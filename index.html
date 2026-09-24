@@ -69,8 +69,16 @@ let lastSavedValue = "";
 let saveTimer = null;
 let editing = false;
 
+const EMPTY_MARKER = "​"; // GitHub rejects blank/whitespace-only gist file content
+
 function setStatus(msg) { statusEl.textContent = msg; }
 function setErr(msg) { errEl.textContent = msg || ""; }
+
+async function ghError(prefix, res) {
+  let detail = "";
+  try { detail = (await res.json()).message || ""; } catch (e) {}
+  throw new Error(`${prefix} (${res.status})${detail ? " " + detail : ""}`);
+}
 
 function ghHeaders() {
   return {
@@ -93,10 +101,10 @@ async function createGist() {
     body: JSON.stringify({
       description: "clipboard-page",
       public: false,
-      files: { "clip.txt": { content: " " } }
+      files: { "clip.txt": { content: EMPTY_MARKER } }
     })
   });
-  if (!res.ok) throw new Error("建立 Gist 失敗 (" + res.status + ")");
+  if (!res.ok) await ghError("建立 Gist 失敗", res);
   const data = await res.json();
   return data.id;
 }
@@ -126,9 +134,9 @@ async function saveNow() {
     const res = await fetch(`${API}/gists/${gistId}`, {
       method: "PATCH",
       headers: { ...ghHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ files: { "clip.txt": { content: value || " " } } })
+      body: JSON.stringify({ files: { "clip.txt": { content: value || EMPTY_MARKER } } })
     });
-    if (!res.ok) throw new Error("儲存失敗 (" + res.status + ")");
+    if (!res.ok) await ghError("儲存失敗", res);
     lastSavedValue = value;
     setStatus("已儲存 " + new Date().toLocaleTimeString());
   } catch (e) {
@@ -140,11 +148,12 @@ async function loadNow() {
   try {
     setErr("");
     const res = await fetch(`${API}/gists/${gistId}`, { headers: ghHeaders() });
-    if (!res.ok) throw new Error("讀取失敗 (" + res.status + ")");
+    if (!res.ok) await ghError("讀取失敗", res);
     const data = await res.json();
-    const value = (data.files && data.files["clip.txt"] && data.files["clip.txt"].content) || "";
-    if (!editing && value.trim() !== ta.value.trim()) {
-      ta.value = value === " " ? "" : value;
+    const raw = (data.files && data.files["clip.txt"] && data.files["clip.txt"].content) || "";
+    const value = raw === EMPTY_MARKER ? "" : raw;
+    if (!editing && value !== ta.value) {
+      ta.value = value;
       lastSavedValue = ta.value;
     }
     setStatus("已讀取 " + new Date().toLocaleTimeString());
