@@ -7,41 +7,64 @@
 <style>
   body { font-family: -apple-system, "Microsoft JhengHei", Arial, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 12px; }
   textarea { width: 100%; height: 300px; font-size: 16px; padding: 8px; box-sizing: border-box; }
-  input[type=text] { width: 100%; font-size: 14px; padding: 6px; box-sizing: border-box; }
+  input[type=text], input[type=password] { width: 100%; font-size: 14px; padding: 6px; box-sizing: border-box; }
   button { font-size: 14px; padding: 6px 12px; margin: 4px 4px 4px 0; cursor: pointer; }
   #status { color: #666; font-size: 13px; margin: 6px 0; }
   .row { margin: 10px 0; }
   .warn { color: #b00; font-size: 13px; }
+  #setup { border: 1px solid #ddd; padding: 12px; border-radius: 6px; background: #fafafa; }
+  #setup ol { padding-left: 20px; }
+  #app { display: none; }
 </style>
 </head>
 <body>
 <h2>雲端剪貼簿（跨主機文字傳遞）</h2>
 
-<div class="row">
-  <label>這台裝置的網址（第一次要在另一台輸入相同網址，之後直接開這個連結即可）：</label>
-  <input type="text" id="shareUrl" readonly onclick="this.select()">
+<div id="setup">
+  <p>用 GitHub Gist 當儲存空間，需要一個只有 <b>gist</b> 權限的 Personal Access Token（只存在這個瀏覽器的 localStorage，不會傳到別的地方）。</p>
+  <ol>
+    <li>點這個連結建立 token（已預選 gist 權限）：
+      <a href="https://github.com/settings/tokens/new?scopes=gist&description=clipboard-page" target="_blank" rel="noopener">建立 GitHub Token</a>
+    </li>
+    <li>設定過期時間、按最下面「Generate token」</li>
+    <li>複製產生的 token（只會顯示一次），貼到下面：</li>
+  </ol>
+  <input type="password" id="tokenInput" placeholder="貼上 ghp_ 開頭的 token">
+  <button onclick="saveToken()">儲存並開始</button>
+  <div id="setupErr" class="warn"></div>
 </div>
 
-<textarea id="clip" placeholder="在這裡貼上或輸入文字，會自動同步…"></textarea>
+<div id="app">
+  <div class="row">
+    <label>這台裝置的分享網址（第一次要在另一台裝置的網址列輸入同樣網址，之後直接開這個連結即可同步）：</label>
+    <input type="text" id="shareUrl" readonly onclick="this.select()">
+  </div>
 
-<div class="row">
-  <button onclick="saveNow()">立即儲存</button>
-  <button onclick="loadNow()">立即讀取</button>
-  <button onclick="copyText()">複製文字</button>
-  <button onclick="newRoom()">開新房間</button>
+  <textarea id="clip" placeholder="在這裡貼上或輸入文字，會自動同步…"></textarea>
+
+  <div class="row">
+    <button onclick="saveNow()">立即儲存</button>
+    <button onclick="loadNow()">立即讀取</button>
+    <button onclick="copyText()">複製文字</button>
+    <button onclick="newRoom()">開新分享</button>
+    <button onclick="forgetToken()">清除 Token（登出這台裝置）</button>
+  </div>
+
+  <div id="status">初始化中…</div>
+  <div id="err" class="warn"></div>
 </div>
-
-<div id="status">初始化中…</div>
-<div id="err" class="warn"></div>
 
 <script>
-const KVDB = "https://kvdb.io";
+const API = "https://api.github.com";
 const ta = document.getElementById('clip');
 const statusEl = document.getElementById('status');
 const errEl = document.getElementById('err');
 const shareUrlEl = document.getElementById('shareUrl');
+const setupEl = document.getElementById('setup');
+const appEl = document.getElementById('app');
 
-let bucket = null;
+let token = null;
+let gistId = null;
 let lastSavedValue = "";
 let saveTimer = null;
 let editing = false;
@@ -49,35 +72,47 @@ let editing = false;
 function setStatus(msg) { statusEl.textContent = msg; }
 function setErr(msg) { errEl.textContent = msg || ""; }
 
+function ghHeaders() {
+  return {
+    "Authorization": "Bearer " + token,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
+
 function updateShareUrl() {
-  const url = location.origin + location.pathname + "#b=" + bucket;
+  const url = location.origin + location.pathname + "#g=" + gistId;
   shareUrlEl.value = url;
-  history.replaceState(null, "", "#b=" + bucket);
+  history.replaceState(null, "", "#g=" + gistId);
 }
 
-async function createBucket() {
-  const fakeEmail = "clip-" + Math.random().toString(36).slice(2, 10) + "@example.com";
-  const res = await fetch(KVDB + "/", {
+async function createGist() {
+  const res = await fetch(API + "/gists", {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: "email=" + encodeURIComponent(fakeEmail)
+    headers: { ...ghHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      description: "clipboard-page",
+      public: false,
+      files: { "clip.txt": { content: " " } }
+    })
   });
-  if (!res.ok) throw new Error("建立房間失敗 (" + res.status + ")");
-  return (await res.text()).trim();
+  if (!res.ok) throw new Error("建立 Gist 失敗 (" + res.status + ")");
+  const data = await res.json();
+  return data.id;
 }
 
-async function initBucket() {
-  const hashMatch = location.hash.match(/b=([A-Za-z0-9_-]+)/);
+async function initGist() {
+  const hashMatch = location.hash.match(/g=([A-Za-z0-9]+)/);
   if (hashMatch) {
-    bucket = hashMatch[1];
-    localStorage.setItem('kvdb_bucket', bucket);
+    gistId = hashMatch[1];
+    localStorage.setItem('clip_gist_id', gistId);
   } else {
-    bucket = localStorage.getItem('kvdb_bucket');
+    gistId = localStorage.getItem('clip_gist_id');
   }
-  if (!bucket) {
-    setStatus("建立新房間中…");
-    bucket = await createBucket();
-    localStorage.setItem('kvdb_bucket', bucket);
+  if (!gistId) {
+    setStatus("建立新分享中…");
+    gistId = await createGist();
+    localStorage.setItem('clip_gist_id', gistId);
   }
   updateShareUrl();
 }
@@ -88,7 +123,11 @@ async function saveNow() {
   if (value === lastSavedValue) return;
   try {
     setErr("");
-    const res = await fetch(`${KVDB}/${bucket}/clip`, { method: "PUT", body: value });
+    const res = await fetch(`${API}/gists/${gistId}`, {
+      method: "PATCH",
+      headers: { ...ghHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ files: { "clip.txt": { content: value || " " } } })
+    });
     if (!res.ok) throw new Error("儲存失敗 (" + res.status + ")");
     lastSavedValue = value;
     setStatus("已儲存 " + new Date().toLocaleTimeString());
@@ -100,16 +139,13 @@ async function saveNow() {
 async function loadNow() {
   try {
     setErr("");
-    const res = await fetch(`${KVDB}/${bucket}/clip`);
-    if (res.status === 404) {
-      setStatus("房間是空的（尚未有內容）");
-      return;
-    }
+    const res = await fetch(`${API}/gists/${gistId}`, { headers: ghHeaders() });
     if (!res.ok) throw new Error("讀取失敗 (" + res.status + ")");
-    const value = await res.text();
-    if (!editing && value !== ta.value) {
-      ta.value = value;
-      lastSavedValue = value;
+    const data = await res.json();
+    const value = (data.files && data.files["clip.txt"] && data.files["clip.txt"].content) || "";
+    if (!editing && value.trim() !== ta.value.trim()) {
+      ta.value = value === " " ? "" : value;
+      lastSavedValue = ta.value;
     }
     setStatus("已讀取 " + new Date().toLocaleTimeString());
   } catch (e) {
@@ -129,9 +165,23 @@ async function copyText() {
 }
 
 function newRoom() {
-  if (!confirm("確定要開新房間嗎？目前的分享連結將失效，需要在另一台裝置重新輸入新網址。")) return;
-  localStorage.removeItem('kvdb_bucket');
+  if (!confirm("確定要開新分享嗎？目前的分享連結將失效，需要在另一台裝置重新輸入新網址。")) return;
+  localStorage.removeItem('clip_gist_id');
   location.hash = "";
+  location.reload();
+}
+
+function forgetToken() {
+  if (!confirm("確定要清除這台裝置的 Token 嗎？")) return;
+  localStorage.removeItem('clip_token');
+  location.reload();
+}
+
+function saveToken() {
+  const v = document.getElementById('tokenInput').value.trim();
+  const errEl2 = document.getElementById('setupErr');
+  if (!v) { errEl2.textContent = "請貼上 token"; return; }
+  localStorage.setItem('clip_token', v);
   location.reload();
 }
 
@@ -143,13 +193,24 @@ ta.addEventListener('input', () => {
 });
 
 (async function main() {
+  token = localStorage.getItem('clip_token');
+  if (!token) {
+    setupEl.style.display = "block";
+    appEl.style.display = "none";
+    return;
+  }
+  setupEl.style.display = "none";
+  appEl.style.display = "block";
   try {
-    await initBucket();
+    await initGist();
     await loadNow();
-    setInterval(loadNow, 3000);
+    setInterval(loadNow, 4000);
   } catch (e) {
     setErr("初始化錯誤：" + e.message);
     setStatus("失敗");
+    if (String(e.message).includes("401") || String(e.message).includes("403")) {
+      setErr("Token 可能無效或過期，請清除後重新設定。");
+    }
   }
 })();
 </script>
