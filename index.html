@@ -56,7 +56,12 @@ function updateShareUrl() {
 }
 
 async function createBucket() {
-  const res = await fetch(KVDB + "/", { method: "POST" });
+  const fakeEmail = "clip-" + Math.random().toString(36).slice(2, 10) + "@example.com";
+  const res = await fetch(KVDB + "/", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "email=" + encodeURIComponent(fakeEmail)
+  });
   if (!res.ok) throw new Error("建立房間失敗 (" + res.status + ")");
   return (await res.text()).trim();
 }
